@@ -19,7 +19,9 @@
 # SOFTWARE.
 
 from collections import defaultdict
+from functools import wraps
 from os import path
+import pickle
 
 from dominate import tags
 
@@ -27,6 +29,18 @@ from .core import Text, RichSentence, Goals, Messages
 from . import transforms, GENERATOR
 
 _SELF_PATH = path.dirname(path.realpath(__file__))
+
+JS_UNMINIFY = """<script>
+    // Resolve backreferences
+    document.addEventListener("DOMContentLoaded", function() {
+        var references = document.querySelectorAll(
+            '.alectryon-io .goal-hyps, ' +
+            '.alectryon-io .goal-hyps > div, ' +
+            '.alectryon-io .goal-conclusion');
+        document.querySelectorAll('.alectryon-io q').forEach(q =>
+            q.replaceWith(references[parseInt(q.innerText, 16)].cloneNode(true)));
+    });
+</script>"""
 
 ADDITIONAL_HEADS = [
     '<meta name="viewport" content="width=device-width, initial-scale=1">'
@@ -44,6 +58,9 @@ class ASSETS:
     IBM_PLEX_CDN = '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/IBM-type/0.5.4/css/ibm-type.min.css" integrity="sha512-sky5cf9Ts6FY1kstGOBHSybfKqdHR41M0Ldb0BjNiv3ifltoQIsg0zIaQ+wwdwgQ0w9vKFW7Js50lxH9vqNSSw==" crossorigin="anonymous" />' # pylint: disable=line-too-long
     FIRA_CODE_CDN = '<link rel="stylesheet" href="https://cdnjs.cloudflare.com/ajax/libs/firacode/5.2.0/fira_code.min.css" integrity="sha512-MbysAYimH1hH2xYzkkMHB6MqxBqfP0megxsCLknbYqHVwXTCg9IqHbk+ZP/vnhO8UEW6PaXAkKe2vQ+SWACxxA==" crossorigin="anonymous" />' # pylint: disable=line-too-long
 
+def b16(i):
+    return hex(i)[len("0x"):]
+
 class Gensym():
     def __init__(self, stem):
         self.stem = stem
@@ -51,7 +68,7 @@ class Gensym():
 
     def __call__(self, prefix):
         self.counters[prefix] += 1
-        return self.stem + prefix + hex(self.counters[prefix])[len("0x"):]
+        return self.stem + prefix + b16(self.counters[prefix])
 
 # pylint: disable=line-too-long
 HEADER = (
@@ -69,10 +86,28 @@ def gen_banner(generator, include_version_info=True):
 def wrap_classes(*cls):
     return " ".join("alectryon-" + c for c in ("root", *cls))
 
+def deduplicate(fn):
+    # Remember to update ADDITIONAL_HEADS for each use of this decorator!
+    @wraps(fn)
+    def _fn(self, *args, **kwargs):
+        if self.backrefs is None:
+            fn(self, *args, **kwargs)
+        else:
+            key = pickle.dumps((args, kwargs))
+            ref = self.backrefs.get(key)
+            if ref is not None:
+                tags.q(ref)
+            else:
+                self.backrefs[key] = b16(len(self.backrefs))
+                fn(self, *args, **kwargs)
+    return _fn
+
 class HtmlGenerator:
-    def __init__(self, highlighter, gensym_stem=""):
+    def __init__(self, highlighter, gensym_stem="", allow_backreferences=False):
         self.highlight = highlighter
         self.gensym = Gensym(gensym_stem + "-" if gensym_stem else "")
+
+        self.backrefs = {} if allow_backreferences else None
 
     @staticmethod
     def gen_label(toggle, cls, *contents):
@@ -80,18 +115,27 @@ class HtmlGenerator:
             return tags.label(*contents, cls=cls, **{"for": toggle})
         return tags.span(*contents, cls=cls)
 
+    @deduplicate
+    def gen_hyp(self, hyp):
+        with tags.div():
+            tags.var(", ".join(hyp.names))
+            if hyp.body:
+                with tags.span(cls="hyp-body"):
+                    tags.b(":=")
+                    self.highlight(hyp.body)
+            with tags.span(cls="hyp-type"):
+                tags.b(":")
+                self.highlight(hyp.type)
+
+    @deduplicate
     def gen_hyps(self, hyps):
         with tags.div(cls="goal-hyps"):
             for hyp in hyps:
-                with tags.div():
-                    tags.var(", ".join(hyp.names))
-                    if hyp.body:
-                        with tags.span(cls="hyp-body"):
-                            tags.b(":=")
-                            self.highlight(hyp.body)
-                    with tags.span(cls="hyp-type"):
-                        tags.b(":")
-                        self.highlight(hyp.type)
+                self.gen_hyp(hyp)
+
+    @deduplicate
+    def gen_ccl(self, conclusion):
+        tags.div(self.highlight(conclusion), cls="goal-conclusion")
 
     def gen_goal(self, goal, toggle=None):
         """Serialize a goal to HTML."""
@@ -109,7 +153,7 @@ class HtmlGenerator:
                 tags.hr()
                 if goal.name:
                     tags.span(goal.name, cls="goal-name")
-            tags.div(self.highlight(goal.conclusion), cls="goal-conclusion")
+            return self.gen_ccl(goal.conclusion)
 
     def gen_checkbox(self, checked, cls):
         nm = self.gensym("chk")
