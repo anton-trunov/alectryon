@@ -20,7 +20,7 @@ Version 2.0
 Breaking changes
 ----------------
 
-- The HTML markup for hypothesis blocks has been simplified to save space in generated files (may affect third-party stylesheets). [de791bc]
+- The HTML markup for ``alectryon-io`` blocks has been simplified to save space in generated files (may affect third-party stylesheets). [de791bc]
 - ``json_of_annotated`` and ``annotated_of_json`` in module ``alectryon.json`` are now ``PlainSerializer.encode`` and ``PlainSerializer.decode``. [3320896]
 
 Version 1.1
